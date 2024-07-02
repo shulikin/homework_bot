@@ -1,10 +1,16 @@
+"""
+Telegram-бот отслеживает статус домашней работы.
+
+Обращается к API сервис Практикум Домашка и передаёт статус..
+"""
+
 import logging
 import os
 import sys
 import time
 from http import HTTPStatus
 
-import telebot.apihelper
+import urllib.error
 import requests
 from telebot import TeleBot
 from dotenv import load_dotenv
@@ -25,9 +31,9 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+FIRST_REGISTRATION = 1709251200
 RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
-# ENDPOINT = ''
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
 
@@ -72,15 +78,18 @@ def get_api_answer(timestamp):
     """
     params = {'from_date': timestamp}
     try:
-        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-        logger.info(f'Ответ на запрос API: {response.status_code}')
-        if response.status_code != HTTPStatus.OK:
-            raise response.raise_for_status()
-    except Exception as error:
+        response = requests.get(url=ENDPOINT, headers=HEADERS, params=params)
+    except requests.RequestException as error:
         message = f'Практикум API недоступен: {error}'
-        logger.error(message)
-        raise Exception(message)
-    return response.json()
+        raise ConnectionError(message)
+    if response.status_code != HTTPStatus.OK:
+        raise urllib.error.HTTPError
+    try:
+        response_json = response.json()
+    except ValueError as error:
+        message = f'Ответ сервера не преобразовываться в JSON: {error}'
+        raise ValueError(message)
+    return response_json
 
 
 def check_response(response: dict) -> list:
@@ -91,16 +100,13 @@ def check_response(response: dict) -> list:
     """
     if not isinstance(response, dict):
         message = 'Ответ API не является словарем'
-        logger.error(message)
         raise TypeError(message)
     homeworks = response.get('homeworks')
     if homeworks is None:
         message = 'В ответе API ключ <homeworks> не найден'
-        logger.error(message)
         raise KeyError(message)
     if not isinstance(homeworks, list):
         message = 'В <homeworks> неверный тип данных'
-        logger.error(message)
         raise TypeError(message)
     return homeworks
 
@@ -112,47 +118,54 @@ def parse_status(homework: dict) -> str:
     Возвращаем из словаря HOMEWORK_VERDICTS <status>
     для отправки в Telegram.
     """
-    print(homework)
-    homework_name = homework.get('homework_name')
-    homework_verdict = homework.get('status')
-    if not homework_name:
-        message = f'Пустое значение по ключу {homework_name}'
-        logger.error(message)
-        raise KeyError(message)
+    if 'homework_name' not in homework:
+        message_error = 'В словаре нет ключа <homework_name>'
+        raise KeyError(message_error)
+    else:
+        homework_name = homework.get('homework_name')
+    if 'status' not in homework:
+        message_error = 'В словаре нет ключа <status>'
+        raise KeyError(message_error)
+    else:
+        homework_verdict = homework.get('status')
     if homework_verdict not in HOMEWORK_VERDICTS:
-        message = f'Статус домашней работы не определен.{homework_verdict}'
-        logger.error(message)
-        raise KeyError(message)
-    verdict = HOMEWORK_VERDICTS[homework_verdict]
-    logging.info('Статус проверки работы обновлен.')
-    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+        message_error = f'Статус работы не определен: <{homework_verdict}>'
+        raise KeyError(message_error)
+    logging.info('Статус работы обновлен.')
+    return (f'Изменился статус проверки работы "{homework_name}".'
+            f'{HOMEWORK_VERDICTS[homework_verdict]}')
 
 
 def main():
     """Основная логика работы бота."""
+    old_message = None
     bot = TeleBot(token=TELEGRAM_TOKEN)
-    timestamp = int(time.time())
+    current_date = FIRST_REGISTRATION
     if not check_tokens():
         logging.critical('Отсутствует переменная окружения')
         sys.exit('Продолжать работу бота нет смысла...')
 
     while True:
         try:
-            response = get_api_answer(timestamp)
+            response = get_api_answer(current_date)
             homeworks = check_response(response)
             if homeworks:
                 status = parse_status(homeworks[0])
-                send_message(bot, status)
+                new_message = f'Статус домашней работы {status}'
+                logger.debug(new_message)
+
             else:
-                logger.debug('Статус домашней работы не изменился')
-        except telebot.apihelper.ApiTelegramException:
-            logging.error('Ошибка отправки сообщения в Telegram')
+                new_message = 'Статус домашней работы не изменился'
+                logger.debug(new_message)
         except Exception as error:
-            message = f'Сбой в работе программы: {error}'
-            logging.error(message)
-            send_message(bot, message)
-        finally:
-            time.sleep(RETRY_PERIOD)
+            new_message = f'Сбой в работе программы: {error}'
+            logging.error({error})
+
+        if old_message != new_message:
+            send_message(bot, new_message)
+        old_message = new_message
+        current_date = int(time.time())
+        time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
