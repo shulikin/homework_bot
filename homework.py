@@ -83,13 +83,13 @@ def get_api_answer(timestamp):
         message = f'Практикум API недоступен: {error}'
         raise ConnectionError(message)
     if response.status_code != HTTPStatus.OK:
-        raise urllib.error.HTTPError
+        message = 'Эндпоинт недоступен'
+        raise urllib.error.HTTPError + (message)
     try:
-        response_json = response.json()
+        return response.json()
     except ValueError as error:
         message = f'Ответ сервера не преобразовываться в JSON: {error}'
         raise ValueError(message)
-    return response_json
 
 
 def check_response(response: dict) -> list:
@@ -140,14 +140,14 @@ def main():
     """Основная логика работы бота."""
     old_message = None
     bot = TeleBot(token=TELEGRAM_TOKEN)
-    current_date = FIRST_REGISTRATION
+    from_date = FIRST_REGISTRATION
     if not check_tokens():
         logging.critical('Отсутствует переменная окружения')
         sys.exit('Продолжать работу бота нет смысла...')
 
     while True:
         try:
-            response = get_api_answer(current_date)
+            response = get_api_answer(from_date)
             homeworks = check_response(response)
             if homeworks:
                 status = parse_status(homeworks[0])
@@ -164,7 +164,7 @@ def main():
         if old_message != new_message:
             send_message(bot, new_message)
         old_message = new_message
-        current_date = int(time.time())
+        from_date = response.get('current_date')
         time.sleep(RETRY_PERIOD)
 
 
